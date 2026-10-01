@@ -7,8 +7,8 @@ import { decode, encode, toEnglish } from './codec.mjs'
 const vocabularyWire = Buffer.from(JSON.stringify(dictionary), 'utf8').toString('base64url')
 
 const message = {
-  v: 2, vocab: dictionary, id: 'p7', from: 'planner', to: ['worker'], i: 'pl', c: 0.94, s: 'new', g: '~dpl', risk: 'lo', ask: 'run',
-  st: [{ id: 's1', a: 'inspect', x: '~sh' }, { id: 's2', a: 'restart', x: '~svc', d: 's1', when: 's1.ok' }],
+  v: 2, vocab: dictionary, id: 'p7', from: 'planner', to: ['worker'], i: 'pl', c: 0.94, s: 'new', g: 'deploy the service', risk: 'lo', ask: 'run',
+  st: [{ id: 's1', a: 'inspect', x: 'service health' }, { id: 's2', a: 'restart', x: 'the service', d: 's1', when: 's1.ok' }],
 }
 
 const eventGraph = {
@@ -29,26 +29,70 @@ const eventGraph = {
 }
 
 test('round trips a compact plan', () => assert.deepEqual(decode(encode(message)), message))
+test('A2 typed guards coexist with literal guards', () => {
+  const mixed = { ...message, st: [message.st[0], message.st[1], { id: 's3', a: 'test', x: 'service', when: { step: 's2', outcome: 'success' } }] }
+  assert.match(encode(mixed), /^A2\|/)
+  assert.deepEqual(decode(encode(mixed)), mixed)
+})
+test('A2 round trips a guarded plan, quantity, and conditional prohibition', () => {
+  const typed = {
+    ...message, i: 'rq', g: 'handle failed restoration',
+    st: [
+      { id: 'restore', a: 'test', x: 'backup restoration' },
+      { id: 'verify', a: 'test', x: 'credentials', when: { step: 'restore', outcome: 'failure' } },
+    ],
+    quantity: { value: '12.5', unit: { ns: 'ucum', id: 'mg.L-1' } },
+    prohibition: { a: 'restart', x: 'production', when: { step: 'restore', outcome: 'failure' }, until: { step: 'verify', outcome: 'success' } },
+  }
+  const wire = encode(typed)
+  assert.match(wire, /^A2\|/)
+  assert.match(wire, /\|%[A-Za-z0-9_-]+(?:\||$)/)
+  assert.deepEqual(decode(wire), typed)
+  const rendered = toEnglish(decode(wire))
+  assert.match(rendered, /Quantity for goal: 12\.5 \[ucum:mg\.L-1\]/)
+  assert.match(rendered, /do not restart production if step restore reports failure, until step verify reports success/)
+  assert.match(rendered, /test credentials when step restore reports failure/)
+})
+test('A2 rejects invalid guards, quantities, and prohibitions', () => {
+  const typed = { ...message, st: [{ id: 's1', a: 'test', x: 'backup' }, { id: 's2', a: 'restart', x: 'service', when: { step: 's1', outcome: 'success' } }] }
+  assert.throws(() => encode({ ...typed, st: [{ ...typed.st[0], when: { step: 's2', outcome: 'success' } }, typed.st[1]] }), /earlier step/)
+  assert.throws(() => encode({ ...typed, st: [typed.st[0], { ...typed.st[1], when: { step: 'missing', outcome: 'success' } }] }), /earlier step/)
+  assert.throws(() => encode({ ...typed, st: [typed.st[0], { ...typed.st[1], when: { step: 's1', outcome: 'unknown' } }] }), /outcome must be success or failure/)
+  assert.throws(() => encode({ ...typed, quantity: { value: '12.5', unit: { ns: 'ucum', id: 'mg/L' } } }), /identifier-safe ontology reference/)
+  assert.throws(() => encode({ ...typed, quantity: { value: '12.5', unit: { ns: 'ucum', id: 'mg.L-1' } }, n: '12.5' }), /cannot both be present/)
+  assert.throws(() => encode({ ...typed, prohibition: { a: 'restart', x: 'service', when: { step: 'missing', outcome: 'failure' } } }), /earlier step/)
+  assert.throws(() => encode({ ...typed, prohibition: { a: 'unknown', x: 'service', when: { step: 's1', outcome: 'failure' } } }), /known a code/)
+  assert.throws(() => encode({ ...typed, v: 3 }), /Only A2 is supported/)
+})
+test('A2 rejects unknown and noncanonical typed wire fields', () => {
+  const base = encode({ ...message, st: [{ id: 's1', a: 'test', x: 'backup' }] })
+  const payload = (value) => Buffer.from(value).toString('base64url')
+  assert.throws(() => decode(`${base}|%${payload('{"unknown":true}')}`), /Unsupported A2 typed fields field/)
+  assert.throws(() => decode(`${base}|%${payload('{"quantity":{"value":"1","unit":{"ns":"ucum","id":"m"}}}')}`), /canonical/)
+  assert.throws(() => decode(`${base}|%${payload('{"guards":{"missing":{"outcome":"success","step":"s1"}}}')}`), /unknown or guarded step/)
+  assert.throws(() => decode(`${base}|%${payload('{}')}`), /must not be empty/)
+  assert.throws(() => decode(`${base}|%${payload('{"quantity":{}}')}`), /quantity.value/)
+})
 test('confidence percentages round trip, including 100%', () => {
   for (const confidence of [0, 0.001, 0.1, 0.29, 0.945, 1]) {
     const encoded = encode({ ...message, c: confidence })
     assert.equal(decode(encoded).c, confidence)
   }
   assert.match(encode({ ...message, c: 1 }), /\|pl100\|/)
-  assert.equal(decode(`A2|x|narrator>reader|in100|new|~od_inv|*${vocabularyWire}`).c, 1)
+  assert.equal(decode(`A2|x|narrator>reader|in100|new|[Odyssey]|*${vocabularyWire}`).c, 1)
   assert.match(toEnglish({ ...message, c: 0.945 }), /94\.5% confidence/)
 })
 test('round trips all supported optional fields without dropping values', () => {
   const complete = {
     ...message, by: '2026-09-30', dep: ['previous'], need: ['credentials'], n: '100000',
-    st: [{ id: 's1', a: 'inspect', x: '~sh', ok: 'health is known' }],
+    st: [{ id: 's1', a: 'inspect', x: 'service health', ok: 'health is known' }],
   }
   assert.deepEqual(decode(encode(complete)), complete)
 })
 test('encodes exact structured numeric results', () => {
-  const result = { ...message, i: 'rs', s: 'ok', g: '~integer_is_whole_number', n: '100000' }
+  const result = { ...message, i: 'rs', s: 'ok', g: 'integer result', n: '100000' }
   assert.match(encode(result), /\|#100000(?:\||$)/)
-  assert.equal(decode(`A2|count|agent>user|rs100|ok|~integer_is_whole_number|*${vocabularyWire}|#100000`).n, '100000')
+  assert.equal(decode(`A2|count|agent>user|rs100|ok|[integer result]|*${vocabularyWire}|#100000`).n, '100000')
   assert.match(toEnglish(result), /Numeric result: 100000/)
 })
 test('rejects ambiguous numeric-result encodings', () => {
@@ -59,7 +103,23 @@ test('round trips a canonical event graph', () => {
   const wire = encode(narrative)
   assert.match(wire, /\|&e\{[^|]+;v\{[^|]+(?:\||$)/)
   assert.deepEqual(decode(wire), narrative)
-  assert.match(toEnglish(narrative), /6 entities, 4 events, 1 quotations, 1 possession links, 1 causal links/)
+  const rendered = toEnglish(decode(wire))
+  assert.match(rendered, /eu \(od:euryclea\)/)
+  assert.match(rendered, /tell \(od\.act:tell\): .*agent=eu \(od:euryclea\).*quoted content=q1.*recipient=pe \(od:penelope\)/)
+  assert.match(rendered, /q1: speaker=eu \(od:euryclea\), recipient=pe \(od:penelope\), quoted events=return \(od\.act:return\), kill \(od\.act:kill\)/)
+  assert.match(rendered, /holder=od \(od:odysseus\), possessed=es \(od:estate\)/)
+  assert.match(rendered, /Claimed causal links: consume \(od\.act:consume\) -> kill \(od\.act:kill\)/)
+})
+test('renders omitted and empty graph relations without inventing details', () => {
+  const graph = {
+    e: { worker: { r: { ns: 'example', id: 'worker' } } },
+    v: { act: { p: { ns: 'example', id: 'act' }, a: { ag: 'worker' } } },
+  }
+  const withoutOptional = toEnglish({ ...message, eg: graph })
+  assert.match(withoutOptional, /other roles=unspecified, time=unspecified, aspect=unspecified/)
+  assert.doesNotMatch(withoutOptional, /Quotations:|Possession links:|Claimed causal links:/)
+  const withEmpty = toEnglish({ ...message, eg: { ...graph, q: {}, o: [], c: [] } })
+  assert.match(withEmpty, /Quotations: none\. Possession links: none\. Claimed causal links: none\./)
 })
 test('rejects event graphs with unresolved role targets', () => {
   const invalid = structuredClone(eventGraph)
@@ -72,11 +132,11 @@ test('requires an identified speaker for quoted event content', () => {
   assert.throws(() => encode({ ...message, eg: invalid }), /q1\.by must reference an entity/)
 })
 test('resolves compact symbol and registered foreign concept aliases', () => {
-  const symbol = { ...message, g: '~+' }
+  const symbol = { ...message, g: '~fx' }
   const foreign = { ...message, g: '~骨折' }
-  assert.equal(decode(encode(symbol)).g, '~+')
+  assert.equal(decode(encode(symbol)).g, '~fx')
   assert.equal(decode(encode(foreign)).g, '~骨折')
-  assert.match(toEnglish(symbol), /Addition combines quantities/)
+  assert.match(toEnglish(symbol), /Fracture/)
   assert.match(toEnglish(foreign), /Fracture/)
 })
 test('round trips commas and backslashes in list fields', () => {
@@ -92,15 +152,20 @@ test('round trips delimiters inside bracketed plan subjects', () => {
   const withLiteral = { ...message, g: 'summary [with|brackets]', st: [{ id: 's1', a: 'inspect', x: 'item; [part]' }] }
   assert.deepEqual(decode(encode(withLiteral)), withLiteral)
 })
+test('round trips literal step executors', () => {
+  const withExecutor = { ...message, st: [{ id: 's1', a: 'inspect', x: 'service health', ag: 'Ava; [east]|team' }] }
+  assert.deepEqual(decode(encode(withExecutor)), withExecutor)
+  assert.match(toEnglish(withExecutor), /by Ava; \[east\]\|team/)
+})
 test('rejects duplicate optional tags instead of taking the last value', () => {
   assert.throws(() => decode(`A2|x|a>b|in100|new|[literal]|*${vocabularyWire}|!lo|!hi`), /Duplicate A2 tag: !/)
 })
 test('rejects fields the wire format cannot preserve', () => {
   assert.throws(() => encode({ ...message, unsupported: 'meaning' }), /Unsupported message field/)
-  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: '~sh', by: 'tomorrow' }] }), /Unsupported st\[0\] field: by/)
-  assert.throws(() => encode({ ...message, st: [{ id: 'bad:id', a: 'inspect', x: '~sh' }] }), /valid id/)
-  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: '~sh', d: 's1' }] }), /Cyclic step dependency/)
-  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: '~sh', d: 's2' }, { id: 's2', a: 'inspect', x: '~sh', d: 's1' }] }), /Cyclic step dependency/)
+  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: 'service health', by: 'tomorrow' }] }), /Unsupported st\[0\] field: by/)
+  assert.throws(() => encode({ ...message, st: [{ id: 'bad:id', a: 'inspect', x: 'service health' }] }), /valid id/)
+  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: 'service health', d: 's1' }] }), /Cyclic step dependency/)
+  assert.throws(() => encode({ ...message, st: [{ id: 's1', a: 'inspect', x: 'service health', d: 's2' }, { id: 's2', a: 'inspect', x: 'service health', d: 's1' }] }), /Cyclic step dependency/)
 })
 test('A2 wire form carries its vocabulary', () => {
   const wire = encode(message)
@@ -114,15 +179,15 @@ test('A2 resolves full, delta, and reference vocabularies', () => {
   const registry = { [fullManifest.hash]: dictionary }
   const deltaVocabulary = {
     format: 2, mode: 'delta', base: fullManifest.hash,
-    data: { codes: { c: { a2_feedback: 'feedback about A2' } } },
+    data: { codes: { c: { a2_feedback: { ref: { ns: 'example', id: 'a2-feedback' }, en: 'feedback about A2' } } } },
   }
   const deltaMessage = { ...message, id: 'delta', vocab: deltaVocabulary, g: '~a2_feedback' }
   const deltaWire = encode(deltaMessage, { vocabularies: registry })
-  assert.equal(decode(deltaWire, { vocabularies: registry }).vocab.codes.c.a2_feedback, 'feedback about A2')
+  assert.deepEqual(decode(deltaWire, { vocabularies: registry }).vocab.codes.c.a2_feedback, deltaVocabulary.data.codes.c.a2_feedback)
   const referenceMessage = { ...message, id: 'reference', vocab: { format: 2, mode: 'reference', hash: fullManifest.hash } }
   assert.deepEqual(decode(encode(referenceMessage, { vocabularies: registry }), { vocabularies: registry }).vocab, dictionary)
   assert.throws(() => decode(encode(referenceMessage, { vocabularies: registry })), /vocabulary is unavailable/)
-  assert.throws(() => encode({ ...deltaMessage, vocab: { ...deltaVocabulary, data: { codes: { c: { dpl: 'different meaning' } } } } }, { vocabularies: registry }), /conflicts with the base vocabulary/)
+  assert.throws(() => encode({ ...deltaMessage, vocab: { ...deltaVocabulary, data: { codes: { c: { 'med.fx': { ref: { ns: 'sct', id: 'other' } } } } } } }, { vocabularies: registry }), /conflicts with the base vocabulary/)
 })
 test('renders all safety-relevant plan fields', () => {
   const text = toEnglish(message)
@@ -151,13 +216,16 @@ test('uses namespace-qualified semantic references for ontology concepts', () =>
 })
 test('embedded A2 guide messages use the dictionary', () => {
   assert.equal(dictionary.guide.en.length, dictionary.guide.a2.length)
-  for (const line of dictionary.guide.a2) assert.doesNotThrow(() => decode(line))
-})
-test('expanded dictionary concepts remain valid and decodable', () => {
-  const conceptCodes = ['addition_combines_quantities', 'planet_orbits_star', 'cell_membrane_controls_entry_and_exit', 'algorithm_is_stepwise_procedure', 'story_has_plot_characters_setting', 'contracts_create_obligations']
-  for (const code of conceptCodes) {
-    assert.doesNotThrow(() => encode({ v: 2, vocab: dictionary, id: `k${code}`, from: 'tester', to: ['reader'], i: 'in', c: 1, s: 'new', g: `~${code}` }))
+  for (const [index, line] of dictionary.guide.a2.entries()) {
+    const decoded = decode(line)
+    assert.equal(decoded.g, dictionary.guide.en[index])
+    assert.ok(toEnglish(decoded).includes(dictionary.guide.en[index]))
+    assert.equal(decode(encode(decoded)).g, dictionary.guide.en[index])
   }
+})
+test('default dictionary contains only ontology-backed concepts', () => {
+  for (const definition of Object.values(dictionary.codes.c)) assert.ok(definition.ref?.ns && definition.ref?.id)
+  assert.throws(() => encode({ ...message, g: '~dpl' }), /known c code/)
 })
 test('checked-in example frames remain decodable', () => {
   const lines = readFileSync(new URL('./examples.ail', import.meta.url), 'utf8').split('\n').filter((line) => line.startsWith('A2|'))

@@ -1,6 +1,7 @@
 # A2
 
 A2 is a compact, deterministic interchange language for AI agents. It carries ideas, status, requests, plans, and event graphs without requiring agents to negotiate their meaning through an ordinary-language conversation.
+A2 also supports typed step-outcome guards, ontology-backed quantities, and conditional prohibitions.
 
 An A2 message is a typed communication act. It says what the sender asserts, requests, or proposes; it is not proof that a claim is true, that work happened, or that an action is authorized.
 
@@ -43,10 +44,10 @@ npm test
 An A2 message is one UTF-8 line with pipe-delimited fields. A compact wire frame begins like this:
 
 ```text
-A2|deploy-42|planner>worker|pl94|new|~dpl|*...|!lo|?run|>s1:inspect~sh,s2:restart~svc<s1
+A2|deploy-42|planner>worker|pl94|new|[deploy the service]|*...|!lo|?run|>s1:inspect[service health];s2:restart[the service]<s1
 ```
 
-The `*...` field is a canonical base64url vocabulary manifest. A2 requires it; the receiver does not need to guess what `~dpl`, `inspect`, or `sh` mean.
+The `*...` field is a canonical base64url vocabulary manifest. A2 requires it; the receiver does not need to guess what `inspect` or any registered concept means. Literal goals and subjects are bracketed until an ontology-backed concept is available.
 
 | Field | Meaning |
 | --- | --- |
@@ -80,12 +81,12 @@ const outbound = {
   i: 'pl',
   c: 0.94,
   s: 'new',
-  g: '~dpl',
+  g: 'deploy the service',
   risk: 'lo',
   ask: 'run',
   st: [
-    { id: 'inspect-health', a: 'inspect', x: '~sh', ok: 'health is known' },
-    { id: 'restart-service', a: 'restart', x: '~svc', d: 'inspect-health', when: 'health permits restart' },
+    { id: 'inspect-health', a: 'inspect', x: 'service health', ok: 'health is known' },
+    { id: 'restart-service', a: 'restart', x: 'the service', d: 'inspect-health', when: { step: 'inspect-health', outcome: 'success' } },
   ],
 }
 
@@ -98,6 +99,31 @@ console.log(toEnglish(received))
 ```
 
 `encode()` validates before serializing. `decode()` resolves and validates the embedded manifest before returning the message object. Both reject malformed frames, unknown codes, invalid references, duplicate tags, unsupported fields, and cyclic or unresolved step dependencies.
+
+Typed conditions and quantities use the same A2 message format:
+
+```js
+const safety = {
+  v: 2, vocab: dictionary, id: 'restoration-42', from: 'coordinator', to: ['operator'],
+  i: 'rq', c: 0.9, s: 'new', g: 'avoid an unsafe restart',
+  st: [
+    { id: 'restore', a: 'test', x: 'backup restoration' },
+    { id: 'verify', a: 'test', x: 'credentials', when: { step: 'restore', outcome: 'failure' } },
+  ],
+  prohibition: {
+    a: 'restart', x: 'production',
+    when: { step: 'restore', outcome: 'failure' },
+    until: { step: 'verify', outcome: 'success' },
+  },
+}
+const sample = {
+  v: 2, vocab: dictionary, id: 'well-w7', from: 'lab', to: ['analyst'],
+  i: 'rs', c: 0.8, s: 'new', g: 'nitrate concentration in well W7',
+  quantity: { value: '12.5', unit: { ns: 'ucum', id: 'mg.L-1' } },
+}
+```
+
+Guards describe reported step outcomes, not independent evidence that a step ran. Hosts must verify conditions and enforce prohibitions through their own policy.
 
 The receiver must use `received.i`, `received.s`, `received.ask`, risk, and its own local policy to decide whether to respond, ask a question, request approval, or execute anything. It must never execute solely because it successfully decoded a message.
 
@@ -139,7 +165,7 @@ function receiveFromAgent(wire, policy) {
 
 ## Vocabulary lifecycle
 
-The vocabulary is part of A2's meaning contract. Concept codes are symbols, not abbreviated English. For new domain concepts, prefer an ontology reference:
+The vocabulary is part of A2's meaning contract. Concept codes are symbols, not abbreviated English. New domain concepts require a namespace-qualified ontology reference; use a literal when no such reference is available:
 
 ```json
 {
@@ -183,6 +209,7 @@ Use `eg` when the message needs source-independent structure beyond a goal conce
 - `c`: explicit causal claims.
 
 The graph makes roles such as agent (`ag`), patient (`pt`), destination (`dst`), and quoted content (`ct`) explicit. Causal links still represent the sender's claim, not proof of causation. See [SPEC.md](SPEC.md) and [semantic.test.mjs](semantic.test.mjs) for complete structures and conformance examples.
+`toEnglish()` displays entity and predicate references, role assignments, quotations, possession, and claimed causal links without interpreting ontology identifiers as unstated facts.
 
 ## Design rules for agent builders
 

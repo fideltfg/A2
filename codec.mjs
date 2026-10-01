@@ -35,6 +35,15 @@ const ontologyReference = (value, path) => {
   for (const key of ['ns', 'id']) if (typeof value[key] !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(value[key])) throw new Error(`${path}.${key} must be an identifier-safe ontology reference`)
 }
 
+const guard = (value, steps, path, before = steps.length) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must be a step outcome guard`)
+  allowedKeys(value, ['step', 'outcome'], path)
+  if (!['success', 'failure'].includes(value.outcome)) throw new Error(`${path}.outcome must be success or failure`)
+  // A step cannot depend on its own or a future step's reported outcome.
+  const index = steps.findIndex((step) => step.id === value.step)
+  if (index < 0 || index >= before) throw new Error(`${path}.step must reference an earlier step`)
+}
+
 const graph = (value, path) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${path} must be an object`)
   allowedKeys(value, ['e', 'v', 'q', 'o', 'c'], path)
@@ -241,7 +250,7 @@ function graphFromWire(value) {
 
 export function validate(message, options = {}) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('A2 message must be an object')
-  allowedKeys(message, ['v', 'id', 'from', 'to', 'i', 'c', 's', 'g', 'n', 'eg', 'ask', 'risk', 'by', 'dep', 'need', 'st', 'vocab', 'vocabMeta'], 'message')
+  allowedKeys(message, ['v', 'id', 'from', 'to', 'i', 'c', 's', 'g', 'n', 'quantity', 'prohibition', 'eg', 'ask', 'risk', 'by', 'dep', 'need', 'st', 'vocab', 'vocabMeta'], 'message')
   for (const key of ['v', 'id', 'from', 'to', 'i', 'c', 's', 'g']) if (!(key in message)) throw new Error(`Missing required field: ${key}`)
   if (message.v !== 2) throw new Error('Only A2 is supported')
   const messageVocabulary = resolveVocabulary(message.vocab, options).data
@@ -252,6 +261,14 @@ export function validate(message, options = {}) {
   code('i', message.i, 'i', messageVocabulary); code('s', message.s, 's', messageVocabulary)
   if (message.g.startsWith('~')) concept(message.g.slice(1), 'g', messageVocabulary)
   if ('n' in message) canonicalDecimal(message.n, 'n')
+  if ('quantity' in message) {
+    const quantity = message.quantity
+    if (!quantity || typeof quantity !== 'object' || Array.isArray(quantity)) throw new Error('quantity must be an object')
+    allowedKeys(quantity, ['value', 'unit'], 'quantity')
+    if ('n' in message) throw new Error('n and quantity cannot both be present')
+    canonicalDecimal(quantity.value, 'quantity.value')
+    ontologyReference(quantity.unit, 'quantity.unit')
+  }
   if ('eg' in message) graph(message.eg, 'eg')
   if ('ask' in message) code('ask', message.ask, 'ask', messageVocabulary)
   if ('risk' in message) code('risk', message.risk, 'risk', messageVocabulary)
@@ -272,7 +289,11 @@ export function validate(message, options = {}) {
       if ('ag' in step && (typeof step.ag !== 'string' || !step.ag || step.ag.includes('\n'))) throw new Error(`st[${index}].ag must be a non-empty single-line value`)
       if (step.ag?.startsWith('~')) concept(step.ag.slice(1), `st[${index}].ag`, messageVocabulary)
       if ('d' in step && (typeof step.d !== 'string' || !message.st.some((candidate) => candidate.id === step.d))) throw new Error(`Unknown step dependency: ${step.d}`)
-      for (const key of ['when', 'ok']) if (key in step && (typeof step[key] !== 'string' || !step[key] || /[\n;=~]/.test(step[key]))) throw new Error(`st[${index}].${key} must be a non-empty single-line value without reserved delimiters`)
+      if ('when' in step) {
+        if (typeof step.when === 'object' && step.when !== null) guard(step.when, message.st, `st[${index}].when`, index)
+        else if (typeof step.when !== 'string' || !step.when || /[\n;=~]/.test(step.when)) throw new Error(`st[${index}].when must be a non-empty single-line value without reserved delimiters`)
+      }
+      if ('ok' in step && (typeof step.ok !== 'string' || !step.ok || /[\n;=~]/.test(step.ok))) throw new Error(`st[${index}].ok must be a non-empty single-line value without reserved delimiters`)
     }
     const stepsById = new Map(message.st.map((step) => [step.id, step]))
     for (const step of message.st) {
@@ -284,6 +305,16 @@ export function validate(message, options = {}) {
         current = stepsById.get(current.d)
       }
     }
+  }
+  if ('prohibition' in message) {
+    const rule = message.prohibition
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) throw new Error('prohibition must be an object')
+    allowedKeys(rule, ['a', 'x', 'when', 'until'], 'prohibition')
+    code('a', rule.a, 'prohibition.a', messageVocabulary)
+    if (typeof rule.x !== 'string' || !rule.x || rule.x.includes('\n')) throw new Error('prohibition.x must be a non-empty single-line subject')
+    if (rule.x.startsWith('~')) concept(rule.x.slice(1), 'prohibition.x', messageVocabulary)
+    guard(rule.when, message.st ?? [], 'prohibition.when')
+    if ('until' in rule) guard(rule.until, message.st ?? [], 'prohibition.until')
   }
   return message
 }
@@ -351,7 +382,7 @@ function unliteral(value) {
 }
 
 function stepsToWire(steps) {
-  return steps.map((step) => `${step.id}:${step.a}${semantic(step.x)}${step.ag ? `@${semantic(step.ag)}` : ''}${step.d ? `<${step.d}` : ''}${step.when ? `~${step.when}` : ''}${step.ok ? `=${step.ok}` : ''}`).join(';')
+  return steps.map((step) => `${step.id}:${step.a}${semantic(step.x)}${step.ag ? `@${semantic(step.ag)}` : ''}${step.d ? `<${step.d}` : ''}${typeof step.when === 'string' ? `~${step.when}` : ''}${step.ok ? `=${step.ok}` : ''}`).join(';')
 }
 
 function confidenceToWire(value) {
@@ -368,7 +399,7 @@ function confidenceToWire(value) {
 
 function parseSteps(value) {
   return splitSteps(value.slice(1)).map((part) => {
-    const match = part.match(/^([^:]+):([^\[~@]+)(?:(~[^<@~=;]+)|\[((?:\\.|[^\]])*)\])(?:@(~[^<@~=;]+)|\[((?:\\.|[^\]])*)\])?(?:<([^~=]+))?(?:~([^=]+))?(?:=(.*))?$/)
+    const match = part.match(/^([^:]+):([^\[~@]+)(?:(~[^<@~=;]+)|\[((?:\\.|[^\]])*)\])(?:@(?:(~[^<@~=;]+)|\[((?:\\.|[^\]])*)\]))?(?:<([^~=]+))?(?:~([^=]+))?(?:=(.*))?$/)
     if (!match) throw new Error(`Invalid step: ${part}`)
     const step = { id: match[1], a: match[2], x: match[3] ?? unliteral(`[${match[4]}]`) }
     if (match[5] || match[6]) step.ag = match[5] ?? unliteral(`[${match[6]}]`)
@@ -389,6 +420,15 @@ export function encode(message, options = {}) {
   if (message.dep?.length) fields.push(`^${message.dep.map(escapeListValue).join(',')}`)
   if (message.need?.length) fields.push(`+${message.need.map(escapeListValue).join(',')}`)
   if ('n' in message) fields.push(`#${message.n}`)
+  {
+    // Typed guards live in % while the compact step slot retains literal guards.
+    const data = {}
+    if (message.quantity) data.quantity = message.quantity
+    if (message.prohibition) data.prohibition = message.prohibition
+    const guards = Object.fromEntries((message.st ?? []).filter((step) => typeof step.when === 'object').map((step) => [step.id, step.when]))
+    if (Object.keys(guards).length) data.guards = guards
+    if (Object.keys(data).length) fields.push(`%${Buffer.from(JSON.stringify(canonicalize(data))).toString('base64url')}`)
+  }
   if ('eg' in message) fields.push(`&${graphToWire(message.eg)}`)
   if (message.st?.length) fields.push(`>${stepsToWire(message.st)}`)
   return fields.join('|')
@@ -407,6 +447,7 @@ export function decode(wire, options = {}) {
   if (routeParts.length !== 2) throw new Error('Route must contain exactly one > separator')
   const message = { v: 2, id, from: unescape(routeParts[0]), to: splitEscaped(routeParts[1], ',').map(unescape), i: intent, c: Number(confidence) / 100, s: state, g: goal.startsWith('~') ? goal : unliteral(goal) }
   const seenTags = new Set()
+  let typedFields
   for (const field of optional) {
     const tag = field[0]
     if (seenTags.has(tag)) throw new Error(`Duplicate A2 tag: ${tag}`)
@@ -418,9 +459,30 @@ export function decode(wire, options = {}) {
     else if (field.startsWith('+')) message.need = splitEscaped(field.slice(1), ',').map(unescape)
     else if (field.startsWith('#')) message.n = field.slice(1)
     else if (field.startsWith('*')) message.vocab = vocabularyFromWire(field.slice(1))
+    else if (field.startsWith('%')) {
+      const data = Buffer.from(field.slice(1), 'base64url').toString('utf8')
+      try { typedFields = JSON.parse(data) } catch { throw new Error('Invalid A2 typed fields') }
+      if (Buffer.from(data).toString('base64url') !== field.slice(1) || JSON.stringify(canonicalize(typedFields)) !== data) throw new Error('A2 typed fields must be canonical')
+    }
     else if (field.startsWith('&')) message.eg = graphFromWire(field.slice(1))
     else if (field.startsWith('>')) message.st = parseSteps(field)
     else throw new Error(`Unknown A2 tag: ${field}`)
+  }
+  if (typedFields !== undefined) {
+    // Optional tags can arrive in either order, so attach guards after parsing steps.
+    if (!typedFields || typeof typedFields !== 'object' || Array.isArray(typedFields)) throw new Error('A2 typed fields must be an object')
+    allowedKeys(typedFields, ['guards', 'quantity', 'prohibition'], 'A2 typed fields')
+    if (!Object.keys(typedFields).length) throw new Error('A2 typed fields must not be empty')
+    if ('quantity' in typedFields) message.quantity = typedFields.quantity
+    if ('prohibition' in typedFields) message.prohibition = typedFields.prohibition
+    if ('guards' in typedFields) {
+      if (!typedFields.guards || typeof typedFields.guards !== 'object' || Array.isArray(typedFields.guards) || !Object.keys(typedFields.guards).length) throw new Error('A2 guards must be a non-empty map')
+      for (const [id, guardValue] of Object.entries(typedFields.guards)) {
+        const step = message.st?.find((candidate) => candidate.id === id)
+        if (!step || 'when' in step) throw new Error(`A2 guard refers to an unknown or guarded step: ${id}`)
+        step.when = guardValue
+      }
+    }
   }
   const resolvedVocabulary = resolveVocabulary(message.vocab, options)
   message.vocab = resolvedVocabulary.data
@@ -434,6 +496,32 @@ const meaning = (group, value, vocabulary = dictionary) => {
 }
 const conceptMeaning = (value, vocabulary = dictionary) => value.startsWith('~') ? meaning('c', value.slice(1), vocabulary) : value
 
+const graphReference = (reference) => `${reference.ns}:${reference.id}`
+const guardMeaning = (value) => `step ${value.step} reports ${value.outcome}`
+
+function renderEventGraph(graph) {
+  const entity = (id) => `${id} (${graphReference(graph.e[id].r)})`
+  const event = (id) => `${id} (${graphReference(graph.v[id].p)})`
+  const roles = { ag: 'agent', pt: 'patient', to: 'recipient', ct: 'quoted content', src: 'source', dst: 'destination', loc: 'location', ins: 'instrument', ben: 'beneficiary' }
+  const times = { pa: 'past', pr: 'present', fu: 'future', un: 'unspecified' }
+  const aspects = { pf: 'perfective', ip: 'imperfective', pg: 'progressive', un: 'unspecified' }
+  const lines = [
+    `Entities: ${Object.keys(graph.e).sort().map(entity).join('; ')}.`,
+    `Events: ${Object.keys(graph.v).sort().map((id) => {
+      const item = graph.v[id]
+      const participants = Object.keys(item.a).sort().map((role) => `${roles[role]}=${role === 'ct' ? item.a[role] : entity(item.a[role])}`)
+      return `${event(id)}: ${[...participants, 'other roles=unspecified', `time=${times[item.t ?? 'un']}`, `aspect=${aspects[item.x ?? 'un']}`].join(', ')}`
+    }).join('; ')}.`,
+  ]
+  if (graph.q) lines.push(`Quotations: ${Object.keys(graph.q).sort().map((id) => {
+    const quote = graph.q[id]
+    return `${id}: speaker=${entity(quote.by)}, recipient=${quote.to ? entity(quote.to) : 'unspecified'}, quoted events=${quote.v.map(event).join(', ')}`
+  }).join('; ') || 'none'}.`)
+  if (graph.o) lines.push(`Possession links: ${graph.o.map((link) => `holder=${entity(link.h)}, possessed=${entity(link.p)}`).join('; ') || 'none'}.`)
+  if (graph.c) lines.push(`Claimed causal links: ${graph.c.map((link) => `${event(link.a)} -> ${event(link.b)}`).join('; ') || 'none'}.`)
+  return lines.join(' ')
+}
+
 export function toEnglish(message) {
   validate(message)
   const messageVocabulary = message.vocab
@@ -444,7 +532,12 @@ export function toEnglish(message) {
   if (message.dep?.length) lines.push(`Depends on messages: ${message.dep.join(', ')}.`)
   if (message.need?.length) lines.push(`Missing information: ${message.need.join('; ')}.`)
   if ('n' in message) lines.push(`Numeric result: ${message.n}.`)
-  if (message.eg) lines.push(`Event graph: ${Object.keys(message.eg.e).length} entities, ${Object.keys(message.eg.v).length} events, ${Object.keys(message.eg.q ?? {}).length} quotations, ${(message.eg.o ?? []).length} possession links, ${(message.eg.c ?? []).length} causal links.`)
-  if (message.st?.length) lines.push(`Plan: ${message.st.map((step, index) => `${index + 1}. ${meaning('a', step.a, messageVocabulary)} ${conceptMeaning(step.x, messageVocabulary)}${step.ag ? ` by ${conceptMeaning(step.ag, messageVocabulary)}` : ''}${step.d ? ` after ${step.d}` : ''}${step.when ? ` when ${step.when}` : ''}${step.ok ? `; success means ${step.ok}` : ''}`).join(' ')}`)
+  if (message.quantity) lines.push(`Quantity for goal: ${message.quantity.value} [${graphReference(message.quantity.unit)}].`)
+  if (message.prohibition) {
+    const rule = message.prohibition
+    lines.push(`Conditional prohibition: do not ${meaning('a', rule.a, messageVocabulary)} ${conceptMeaning(rule.x, messageVocabulary)} if ${guardMeaning(rule.when)}${rule.until ? `, until ${guardMeaning(rule.until)}` : ''}.`)
+  }
+  if (message.eg) lines.push(renderEventGraph(message.eg))
+  if (message.st?.length) lines.push(`Plan: ${message.st.map((step, index) => `${index + 1}. ${meaning('a', step.a, messageVocabulary)} ${conceptMeaning(step.x, messageVocabulary)}${step.ag ? ` by ${conceptMeaning(step.ag, messageVocabulary)}` : ''}${step.d ? ` after ${step.d}` : ''}${step.when ? ` when ${typeof step.when === 'string' ? step.when : guardMeaning(step.when)}` : ''}${step.ok ? `; success means ${step.ok}` : ''}`).join(' ')}`)
   return lines.join(' ')
 }
