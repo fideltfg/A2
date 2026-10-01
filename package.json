@@ -1,0 +1,9 @@
+{
+  "name": "a2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Compact, deterministic AI-to-AI message language",
+  "scripts": { "test": "node --test codec.test.mjs semantic.test.mjs" },
+  "engines": { "node": ">=20" }
+}
