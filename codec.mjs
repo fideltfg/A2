@@ -133,7 +133,7 @@ function resolveVocabulary(value, options = {}) {
   const manifest = vocabularyManifest(value)
   if (manifest.format !== 2) throw new Error('Vocabulary format must be 2')
   acquisition(manifest.acquire, 'Vocabulary acquire')
-  if (manifest.mode === 'reference' && !manifest.acquire?.vocabulary && !options.vocabularies) throw new Error('Reference vocabulary requires acquisition.vocabulary or a local cache')
+  if (manifest.mode === 'reference' && !manifest.acquire?.vocabulary && !options.vocabularies) throw new Error(`Referenced vocabulary is unavailable: ${manifest.hash}`)
   let data
   if (manifest.mode === 'full') data = manifest.data
   else if (manifest.mode === 'delta') data = mergeVocabulary(vocabularyLookup(manifest.base, options, 'Base'), manifest.data, 'Vocabulary delta')
